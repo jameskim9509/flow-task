@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Task Flow</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="container">
+    <h1>Task Flow</h1>
+
+    <p id="storage-warning" class="warning" role="alert" hidden></p>
+
+    <form id="task-form" class="task-form" novalidate>
+      <label for="task-title" class="sr-only">할 일 제목</label>
+      <input id="task-title" name="title" type="text" maxlength="100"
+             placeholder="할 일 제목 (1~100자)" autocomplete="off">
+      <label for="task-priority" class="sr-only">우선순위</label>
+      <select id="task-priority" name="priority">
+        <option value="HIGH">높음</option>
+        <option value="NORMAL" selected>보통</option>
+        <option value="LOW">낮음</option>
+      </select>
+      <label for="task-due-date" class="sr-only">마감일</label>
+      <input id="task-due-date" name="due_date" type="date">
+      <button type="submit">등록</button>
+    </form>
+    <p id="form-error" class="error" role="alert" aria-live="polite"></p>
+
+    <section class="filters" aria-label="검색과 필터">
+      <label for="filter-search" class="sr-only">제목 검색</label>
+      <input id="filter-search" type="search" placeholder="제목 검색" autocomplete="off">
+      <label for="filter-status" class="sr-only">상태 필터</label>
+      <select id="filter-status">
+        <option value="ALL">모든 상태</option>
+        <option value="TODO">할 일</option>
+        <option value="DOING">진행 중</option>
+        <option value="DONE">완료</option>
+      </select>
+      <label for="filter-priority" class="sr-only">우선순위 필터</label>
+      <select id="filter-priority">
+        <option value="ALL">모든 우선순위</option>
+        <option value="HIGH">높음</option>
+        <option value="NORMAL">보통</option>
+        <option value="LOW">낮음</option>
+      </select>
+    </section>
+
+    <section aria-labelledby="list-heading">
+      <h2 id="list-heading">할 일 목록 <span id="task-count">(0)</span></h2>
+      <p id="list-error" class="error" role="alert" aria-live="polite"></p>
+      <p id="empty-message" class="empty">등록된 할 일이 없습니다.</p>
+      <ul id="task-list" class="task-list"></ul>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
