@@ -1,0 +1,4 @@
+# FastAPI: Task Flow REST API
+fastapi==0.143.0
+# uvicorn: FastAPI 실행용 ASGI 서버
+uvicorn[standard]==0.54.0

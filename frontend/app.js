@@ -1,31 +1,45 @@
-// T04: 등록·목록·localStorage 저장·상태 변경·수정·삭제 확인
-//      + 설명·우선순위·마감일·검색·필터·지연 표시
+// T08: 저장 처리를 FastAPI 호출로 교체 (등록·목록·상태 변경·수정·삭제 확인·검색·필터·지연 표시)
 const TITLE_MAX_LENGTH = 100;
 const DESCRIPTION_MAX_LENGTH = 2000;
-const STORAGE_KEY = "task-flow-v1";
 const STATUS_LABELS = { TODO: "할 일", DOING: "진행 중", DONE: "완료" };
 const PRIORITY_LABELS = { HIGH: "높음", NORMAL: "보통", LOW: "낮음" };
-const DEFAULT_STATUS = "TODO";
-const DEFAULT_PRIORITY = "NORMAL";
 const FILTER_ALL = "ALL";
+const SEARCH_DELAY_MS = 250;
 
+// 개발 단계는 화면(5500)과 API(8000)를 따로 실행하고, Nginx 단계는 같은 주소의 /api를 사용한다.
+const API_BASE =
+  window.location.port === "5500"
+    ? `${window.location.protocol}//${window.location.hostname}:8000/api`
+    : "/api";
+
+const MESSAGES = {
+  network: "API 서버에 연결할 수 없습니다. 서버 실행 상태를 확인한 뒤 다시 시도하세요.",
+  notFound: "이미 삭제되었거나 없는 항목입니다. 목록을 다시 불러왔습니다.",
+  invalid: "입력값이 올바르지 않습니다. 다시 확인하세요.",
+  server: "서버 오류가 발생했습니다. 잠시 후 다시 시도하세요.",
+};
+
+// 화면에 표시 중인 목록 (서버에서 필터를 적용한 결과).
 let tasks = [];
-// 저장값이 손상됐거나 저장소를 쓸 수 없으면 false로 두고 저장하지 않는다.
-let canSave = true;
 // 수정 중인 항목의 id (한 번에 하나만 수정한다).
 let editingId = null;
 let editError = "";
+// 저장에 실패한 수정 입력값 (목록 데이터와 분리해 보관한다).
+let editDraft = null;
 // 검색·필터 조건 (저장하지 않는다).
 const filters = { search: "", status: FILTER_ALL, priority: FILTER_ALL };
+// 늦게 도착한 이전 목록 응답이 최신 결과를 덮어쓰지 않도록 요청 순번을 기록한다.
+let listRequestSeq = 0;
+let searchTimer = null;
+let loaded = false;
 
 const form = document.getElementById("task-form");
 const titleInput = document.getElementById("task-title");
 const priorityInput = document.getElementById("task-priority");
 const dueDateInput = document.getElementById("task-due-date");
-const submitButton = form.querySelector("button[type=submit]");
 const formError = document.getElementById("form-error");
 const listError = document.getElementById("list-error");
-const storageWarning = document.getElementById("storage-warning");
+const serverWarning = document.getElementById("server-warning");
 const searchInput = document.getElementById("filter-search");
 const statusFilter = document.getElementById("filter-status");
 const priorityFilter = document.getElementById("filter-priority");
@@ -33,11 +47,59 @@ const taskList = document.getElementById("task-list");
 const taskCount = document.getElementById("task-count");
 const emptyMessage = document.getElementById("empty-message");
 
-function createId() {
-  if (window.crypto && typeof window.crypto.randomUUID === "function") {
-    return window.crypto.randomUUID();
+class ApiError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
   }
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+async function apiRequest(path, { method = "GET", body } = {}) {
+  const options = { method, headers: {} };
+  if (body !== undefined) {
+    options.headers["Content-Type"] = "application/json";
+    options.body = JSON.stringify(body);
+  }
+
+  let response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, options);
+  } catch (error) {
+    throw new ApiError(0, MESSAGES.network);
+  }
+
+  if (response.status === 204) {
+    return null;
+  }
+  if (response.ok) {
+    return response.json();
+  }
+  if (response.status === 404) {
+    throw new ApiError(404, MESSAGES.notFound);
+  }
+  if (response.status === 422) {
+    throw new ApiError(422, MESSAGES.invalid);
+  }
+  throw new ApiError(response.status, MESSAGES.server);
+}
+
+function showServerWarning(message) {
+  serverWarning.textContent = message;
+  serverWarning.hidden = false;
+}
+
+function hideServerWarning() {
+  serverWarning.textContent = "";
+  serverWarning.hidden = true;
+}
+
+// 요청 실패를 화면에 알린다. 연결 실패는 상단 경고로도 표시한다.
+function reportError(error, target) {
+  const message = error instanceof ApiError ? error.message : MESSAGES.server;
+  target.textContent = message;
+  if (error instanceof ApiError && error.status === 0) {
+    showServerWarning(MESSAGES.network);
+  }
 }
 
 function hasKey(labels, value) {
@@ -80,7 +142,7 @@ function validateDescription(rawDescription) {
   return { description: rawDescription };
 }
 
-// 빈 값은 미지정(null)으로 저장한다.
+// 빈 값은 미지정(null)으로 보낸다.
 function validateDueDate(rawDueDate) {
   if (rawDueDate === "") {
     return { dueDate: null };
@@ -98,36 +160,6 @@ function validatePriority(rawPriority) {
   return { priority: rawPriority };
 }
 
-function isValidTask(task) {
-  return (
-    task !== null &&
-    typeof task === "object" &&
-    typeof task.id === "string" &&
-    task.id.length > 0 &&
-    typeof task.title === "string" &&
-    !validateTitle(task.title).error &&
-    typeof task.created_at === "string" &&
-    // 이전 단계에서 저장한 항목에는 없는 필드가 있으므로 미지정은 기본값으로 처리한다.
-    (task.status === undefined || isValidStatus(task.status)) &&
-    (task.description === undefined ||
-      (typeof task.description === "string" && task.description.length <= DESCRIPTION_MAX_LENGTH)) &&
-    (task.priority === undefined || isValidPriority(task.priority)) &&
-    (task.due_date === undefined || task.due_date === null || isValidDateString(task.due_date))
-  );
-}
-
-function normalizeTask(task) {
-  return {
-    id: task.id,
-    title: task.title,
-    description: task.description === undefined ? "" : task.description,
-    status: task.status === undefined ? DEFAULT_STATUS : task.status,
-    priority: task.priority === undefined ? DEFAULT_PRIORITY : task.priority,
-    due_date: task.due_date === undefined ? null : task.due_date,
-    created_at: task.created_at,
-  };
-}
-
 // 로컬 달력 기준 오늘 날짜(YYYY-MM-DD).
 function todayString() {
   const now = new Date();
@@ -140,117 +172,74 @@ function isOverdue(task, today) {
   return task.due_date !== null && task.due_date < today && task.status !== "DONE";
 }
 
-function showStorageWarning(message) {
-  storageWarning.textContent = message;
-  storageWarning.hidden = false;
+function hasActiveFilters() {
+  return (
+    filters.search.trim() !== "" || filters.status !== FILTER_ALL || filters.priority !== FILTER_ALL
+  );
 }
 
-function lockForm() {
-  for (const element of form.elements) {
-    element.disabled = true;
+function buildListQuery() {
+  const params = new URLSearchParams();
+  const keyword = filters.search.trim();
+  if (keyword) {
+    params.set("q", keyword);
   }
+  if (filters.status !== FILTER_ALL) {
+    params.set("status", filters.status);
+  }
+  if (filters.priority !== FILTER_ALL) {
+    params.set("priority", filters.priority);
+  }
+  const query = params.toString();
+  return query ? `?${query}` : "";
 }
 
-function loadTasks() {
-  let raw;
+// 서버에서 현재 검색·필터 조건으로 목록을 다시 불러온다.
+async function loadTasks() {
+  const seq = ++listRequestSeq;
   try {
-    raw = window.localStorage.getItem(STORAGE_KEY);
+    const data = await apiRequest(`/tasks${buildListQuery()}`);
+    if (seq !== listRequestSeq) {
+      return;
+    }
+    tasks = data;
+    loaded = true;
+    if (editingId !== null && !tasks.some((task) => task.id === editingId)) {
+      editingId = null;
+      editError = "";
+      editDraft = null;
+    }
+    hideServerWarning();
+    listError.textContent = "";
   } catch (error) {
-    canSave = false;
-    showStorageWarning("브라우저 저장소를 사용할 수 없습니다. 등록한 할 일은 새로고침하면 사라집니다.");
-    return [];
+    if (seq !== listRequestSeq) {
+      return;
+    }
+    reportError(error, listError);
   }
-
-  if (raw === null) {
-    return [];
-  }
-
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    parsed = undefined;
-  }
-
-  const ids = new Set();
-  const valid =
-    Array.isArray(parsed) &&
-    parsed.every((task) => {
-      if (!isValidTask(task) || ids.has(task.id)) {
-        return false;
-      }
-      ids.add(task.id);
-      return true;
-    });
-
-  if (!valid) {
-    // 손상된 저장값을 덮어쓰지 않도록 저장과 등록을 막는다.
-    canSave = false;
-    lockForm();
-    showStorageWarning(
-      `저장된 데이터(${STORAGE_KEY})가 손상되어 불러오지 못했습니다. ` +
-        "기존 값을 보존하기 위해 등록을 중지했습니다. 저장값을 확인한 뒤 새로고침하세요."
-    );
-    return [];
-  }
-
-  return parsed.map(normalizeTask);
-}
-
-function saveTasks(nextTasks) {
-  if (!canSave) {
-    return true;
-  }
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(nextTasks));
-    return true;
-  } catch (error) {
-    return false;
-  }
-}
-
-// 저장에 성공했을 때만 화면 상태를 바꾼다.
-function commit(nextTasks) {
-  if (!saveTasks(nextTasks)) {
-    listError.textContent = "저장에 실패했습니다. 저장 공간을 확인한 뒤 다시 시도하세요.";
-    return false;
-  }
-  tasks = nextTasks;
-  listError.textContent = "";
-  return true;
+  render();
 }
 
 function findTask(id) {
   return tasks.find((task) => task.id === id);
 }
 
-function updateTask(id, changes) {
-  if (!findTask(id)) {
+// 변경 요청 후 목록을 다시 불러온다. 성공하면 true.
+async function mutate(path, options) {
+  try {
+    await apiRequest(path, options);
+    listError.textContent = "";
+    await loadTasks();
+    return true;
+  } catch (error) {
+    reportError(error, listError);
+    if (error instanceof ApiError && error.status === 404) {
+      await loadTasks();
+      listError.textContent = MESSAGES.notFound;
+    }
+    render();
     return false;
   }
-  return commit(tasks.map((task) => (task.id === id ? { ...task, ...changes } : task)));
-}
-
-function deleteTask(id) {
-  if (!findTask(id)) {
-    return false;
-  }
-  return commit(tasks.filter((task) => task.id !== id));
-}
-
-// 제목 검색·상태·우선순위 조건을 AND로 적용한다.
-function matchesFilters(task) {
-  const keyword = filters.search.trim().toLowerCase();
-  if (keyword && !task.title.toLowerCase().includes(keyword)) {
-    return false;
-  }
-  if (filters.status !== FILTER_ALL && task.status !== filters.status) {
-    return false;
-  }
-  if (filters.priority !== FILTER_ALL && task.priority !== filters.priority) {
-    return false;
-  }
-  return true;
 }
 
 function createButton(label, action, className) {
@@ -324,33 +313,34 @@ function renderViewItem(item, task, today) {
 }
 
 function renderEditItem(item, task) {
+  const values = editDraft || task;
   const fields = document.createElement("div");
   fields.className = "edit-fields";
 
   const titleField = document.createElement("input");
   titleField.type = "text";
   titleField.maxLength = TITLE_MAX_LENGTH;
-  titleField.value = task.title;
+  titleField.value = values.title;
   titleField.dataset.role = "edit-title";
   titleField.setAttribute("aria-label", "제목 수정");
 
   const descriptionField = document.createElement("textarea");
   descriptionField.maxLength = DESCRIPTION_MAX_LENGTH;
-  descriptionField.value = task.description;
+  descriptionField.value = values.description;
   descriptionField.dataset.role = "edit-description";
   descriptionField.placeholder = `설명 (최대 ${DESCRIPTION_MAX_LENGTH}자)`;
   descriptionField.setAttribute("aria-label", "설명 수정");
 
   const dueDateField = document.createElement("input");
   dueDateField.type = "date";
-  dueDateField.value = task.due_date || "";
+  dueDateField.value = values.due_date || "";
   dueDateField.dataset.role = "edit-due-date";
   dueDateField.setAttribute("aria-label", "마감일 수정");
 
   const row = document.createElement("div");
   row.className = "edit-row";
   row.append(
-    createSelect(PRIORITY_LABELS, task.priority, "우선순위 수정", { role: "edit-priority" }),
+    createSelect(PRIORITY_LABELS, values.priority, "우선순위 수정", { role: "edit-priority" }),
     dueDateField,
     createButton("저장", "save"),
     createButton("취소", "cancel")
@@ -369,13 +359,12 @@ function renderEditItem(item, task) {
 
 function render() {
   const today = todayString();
-  const visibleTasks = tasks.filter(matchesFilters);
 
   taskList.replaceChildren();
-  for (const task of visibleTasks) {
+  for (const task of tasks) {
     const item = document.createElement("li");
     item.className = "task-item";
-    item.dataset.id = task.id;
+    item.dataset.id = String(task.id);
     if (task.status === "DONE") {
       item.classList.add("is-done");
     }
@@ -391,32 +380,44 @@ function render() {
     taskList.appendChild(item);
   }
 
-  taskCount.textContent =
-    visibleTasks.length === tasks.length ? `(${tasks.length})` : `(${visibleTasks.length}/${tasks.length})`;
-  emptyMessage.textContent = tasks.length === 0 ? "등록된 할 일이 없습니다." : "조건에 맞는 할 일이 없습니다.";
-  emptyMessage.hidden = visibleTasks.length > 0;
+  const filtered = hasActiveFilters();
+  taskCount.textContent = filtered ? `(${tasks.length}, 필터 적용)` : `(${tasks.length})`;
+  if (!loaded) {
+    emptyMessage.textContent = "목록을 불러오지 못했습니다.";
+  } else {
+    emptyMessage.textContent = filtered ? "조건에 맞는 할 일이 없습니다." : "등록된 할 일이 없습니다.";
+  }
+  emptyMessage.hidden = tasks.length > 0;
 
   if (editingId !== null) {
     const input = taskList.querySelector("[data-role=edit-title]");
-    if (input) {
+    if (input && document.activeElement !== input) {
       input.focus();
     }
+  }
+}
+
+function setFormBusy(busy) {
+  for (const element of form.elements) {
+    element.disabled = busy;
   }
 }
 
 function startEdit(id) {
   editingId = id;
   editError = "";
+  editDraft = null;
   render();
 }
 
 function cancelEdit() {
   editingId = null;
   editError = "";
+  editDraft = null;
   render();
 }
 
-function saveEdit(id, item) {
+async function saveEdit(id, item) {
   const titleResult = validateTitle(item.querySelector("[data-role=edit-title]").value);
   const descriptionResult = validateDescription(item.querySelector("[data-role=edit-description]").value);
   const priorityResult = validatePriority(item.querySelector("[data-role=edit-priority]").value);
@@ -424,6 +425,12 @@ function saveEdit(id, item) {
   const error = titleResult.error || descriptionResult.error || priorityResult.error || dueDateResult.error;
   if (error) {
     editError = error;
+    editDraft = {
+      title: item.querySelector("[data-role=edit-title]").value,
+      description: item.querySelector("[data-role=edit-description]").value,
+      priority: item.querySelector("[data-role=edit-priority]").value,
+      due_date: item.querySelector("[data-role=edit-due-date]").value || null,
+    };
     render();
     return;
   }
@@ -433,14 +440,21 @@ function saveEdit(id, item) {
     priority: priorityResult.priority,
     due_date: dueDateResult.dueDate,
   };
-  if (updateTask(id, changes)) {
-    editingId = null;
-    editError = "";
+  editingId = null;
+  editError = "";
+  editDraft = null;
+  if (!(await mutate(`/tasks/${id}`, { method: "PATCH", body: changes }))) {
+    // 실패하면 입력한 내용을 유지한 채 다시 수정 상태를 보여준다.
+    if (findTask(id)) {
+      editingId = id;
+      editError = listError.textContent;
+      editDraft = changes;
+      render();
+    }
   }
-  render();
 }
 
-function confirmDelete(id) {
+async function confirmDelete(id) {
   const task = findTask(id);
   if (!task) {
     return;
@@ -448,14 +462,14 @@ function confirmDelete(id) {
   if (!window.confirm(`"${task.title}" 항목을 삭제할까요?`)) {
     return;
   }
-  if (deleteTask(id) && editingId === id) {
-    editingId = null;
-    editError = "";
-  }
-  render();
+  await mutate(`/tasks/${id}`, { method: "DELETE" });
 }
 
-form.addEventListener("submit", (event) => {
+async function changeStatus(id, status) {
+  await mutate(`/tasks/${id}`, { method: "PATCH", body: { status } });
+}
+
+form.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (titleInput.disabled) {
     return;
@@ -470,44 +484,42 @@ form.addEventListener("submit", (event) => {
     return;
   }
 
-  const nextTasks = [
-    ...tasks,
-    {
-      id: createId(),
-      title: titleResult.title,
-      description: "",
-      status: DEFAULT_STATUS,
-      priority: priorityResult.priority,
-      due_date: dueDateResult.dueDate,
-      created_at: new Date().toISOString(),
-    },
-  ];
-
-  if (!saveTasks(nextTasks)) {
-    formError.textContent = "저장에 실패했습니다. 저장 공간을 확인한 뒤 다시 시도하세요.";
+  setFormBusy(true);
+  try {
+    await apiRequest("/tasks", {
+      method: "POST",
+      body: {
+        title: titleResult.title,
+        priority: priorityResult.priority,
+        due_date: dueDateResult.dueDate,
+      },
+    });
+    formError.textContent = "";
+    form.reset();
+  } catch (requestError) {
+    reportError(requestError, formError);
     return;
+  } finally {
+    setFormBusy(false);
+    titleInput.focus();
   }
-
-  tasks = nextTasks;
-  formError.textContent = "";
-  form.reset();
-  titleInput.focus();
-  render();
+  await loadTasks();
 });
 
 searchInput.addEventListener("input", () => {
   filters.search = searchInput.value;
-  render();
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(loadTasks, SEARCH_DELAY_MS);
 });
 
 statusFilter.addEventListener("change", () => {
   filters.status = statusFilter.value;
-  render();
+  loadTasks();
 });
 
 priorityFilter.addEventListener("change", () => {
   filters.priority = priorityFilter.value;
-  render();
+  loadTasks();
 });
 
 taskList.addEventListener("click", (event) => {
@@ -516,7 +528,7 @@ taskList.addEventListener("click", (event) => {
     return;
   }
   const item = button.closest("li[data-id]");
-  const id = item.dataset.id;
+  const id = Number(item.dataset.id);
 
   switch (button.dataset.action) {
     case "edit":
@@ -539,9 +551,8 @@ taskList.addEventListener("change", (event) => {
   if (select.dataset.action !== "status" || !isValidStatus(select.value)) {
     return;
   }
-  const id = select.closest("li[data-id]").dataset.id;
-  updateTask(id, { status: select.value });
-  render();
+  const id = Number(select.closest("li[data-id]").dataset.id);
+  changeStatus(id, select.value);
 });
 
 taskList.addEventListener("keydown", (event) => {
@@ -553,11 +564,10 @@ taskList.addEventListener("keydown", (event) => {
   // 설명 입력칸에서는 Enter를 줄바꿈으로 사용한다.
   if (event.key === "Enter" && role !== "edit-description") {
     event.preventDefault();
-    saveEdit(item.dataset.id, item);
+    saveEdit(Number(item.dataset.id), item);
   } else if (event.key === "Escape") {
     cancelEdit();
   }
 });
 
-tasks = loadTasks();
-render();
+loadTasks();

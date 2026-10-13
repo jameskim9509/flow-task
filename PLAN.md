@@ -47,14 +47,44 @@
     T03 회귀 22개 항목 통과, JS 오류 없음.
   - 남은 확인: 실제 브라우저에서 화면 확인. 확인 후 [x] 표시.
 ## 3장: API
-- [ ] T05: API-SPEC.md 작성, FastAPI /api/health 구현.
+- [x] T05: API-SPEC.md 작성, FastAPI /api/health 구현.
   확인: curl로 200과 status=ok.
-- [ ] T06: 메모리 기반 /api/tasks GET과 POST.
+  - 변경 파일: API-SPEC.md, backend/__init__.py, backend/main.py, requirements.txt(fastapi, uvicorn), .gitignore(.venv, .env 등)
+  - 실행 명령: python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt
+    / .venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+  - 확인 결과(2026-10-13): curl http://127.0.0.1:8000/api/health → HTTP 200, {"status":"ok"}.
+- [x] T06: 메모리 기반 /api/tasks GET과 POST.
   확인: /docs에서 등록 후 조회. 입력 위반은 422.
-- [ ] T07: PATCH·DELETE와 필터 구현.
+  - 변경 파일: backend/schemas.py(입력 검증 모델), backend/store.py(메모리 저장소), backend/main.py(GET·POST)
+  - 실행 명령: .venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+  - 확인 결과(2026-10-13): curl로 POST 201(제목 공백 제거, 기본값 TODO·NORMAL·""·null), GET 200 목록 조회.
+    입력 위반 14종 모두 422(빈/공백/누락/101자 제목, 2001자 설명, 잘못된 status·priority, 날짜 형식·없는 날짜·숫자,
+    title 숫자, id·created_at 전달, 잘못된 JSON). 경계 100자 제목·2000자 설명 201. HTML 제목은 글자 그대로 저장.
+    /docs 200, OpenAPI에 /api/tasks 노출. API 재시작 후 목록 비어 있음(메모리 단계 정상).
+    /docs 화면에서 직접 클릭한 확인은 하지 않았고 같은 엔드포인트를 curl로 확인함.
+- [x] T07: PATCH·DELETE와 필터 구현.
   확인: 미전달 필드 유지, 없는 ID 404, 삭제 204.
-- [ ] T08: 프런트엔드 저장 처리를 API 호출로 교체.
+  - 변경 파일: backend/schemas.py(TaskUpdate), backend/store.py(update·delete·필터), backend/main.py(PATCH·DELETE, GET 쿼리)
+  - 실행 명령: .venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+  - 확인 결과(2026-10-13): curl로 PATCH status만·title만 전달 시 나머지 필드 유지, 빈 본문은 변경 없음,
+    due_date null로 해제, 다른 항목 불변. title·description·status·priority null, 공백 제목, 잘못된 값, id·created_at 전달은 422이며
+    위반 요청 후 목록 불변. 없는 ID PATCH·DELETE 404, 문자 id 422. DELETE 204(본문 0바이트), 삭제 id 재사용 안 함.
+    GET q(공백 제거·대소문자 무시)·status·priority AND 동작, 잘못된 status·priority 쿼리 422.
+- [x] T08: 프런트엔드 저장 처리를 API 호출로 교체.
   확인: 화면과 curl 목록이 같음. API 중지 시 오류 표시.
+  - 변경 파일: frontend/app.js(localStorage 제거, API 호출·오류 표시·서버 필터), frontend/index.html(서버 경고 영역),
+    backend/main.py(CORS: 기본 http://127.0.0.1:5500, http://localhost:5500 / 환경변수 CORS_ORIGINS)
+  - 범위: 검색·필터는 GET /api/tasks 쿼리로 서버에서 적용하고, 개수 표시는 "(n, 필터 적용)"으로 바뀜(전체 수 미표시).
+    localStorage 데이터는 자동 이전하지 않는다(PRD).
+  - 실행 명령: API .venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+    / 화면 python3 -m http.server 5500 --bind 127.0.0.1 --directory frontend → http://127.0.0.1:5500
+  - 확인 결과(2026-10-13): 두 서버 실행 후 jsdom(scratchpad 설치)으로 30개 항목 통과 —
+    화면 등록·상태 변경·수정·삭제(취소 포함) 후 화면 목록과 curl GET 목록 일치, curl 등록 후 새로고침 시 화면 일치,
+    필터 중 수정·삭제는 해당 id만 변경, 서버 필터 결과와 화면 일치, 어제 마감 TODO 지연 표시,
+    다른 곳에서 삭제된 항목 변경 시 404 안내·목록 갱신, API 중지 시 등록·상태 변경 오류와 상단 경고 표시(입력값 유지),
+    API 재시작 후 경고 해제·메모리 초기화, HTML 글자 표시, JS 오류 없음.
+    CORS: curl로 허용 origin 사전요청 200·Allow-Origin 헤더 확인, 다른 origin 400·헤더 없음.
+  - 남은 확인: 실제 브라우저에서 화면과 CORS 동작 확인(jsdom의 fetch는 CORS를 적용하지 않음).
 ## 4장: DB
 - [ ] T09: PostgreSQL 전용 사용자·DB와 .env 준비. 접속 확인.
 - [ ] T10: backend/database.py, models.py, init_db.py 생성.
