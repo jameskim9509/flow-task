@@ -1,5 +1,5 @@
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Annotated
 
@@ -73,6 +73,8 @@ class TaskUpdate(BaseModel):
 
 
 class Task(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     title: str
     description: str
@@ -80,3 +82,11 @@ class Task(BaseModel):
     priority: TaskPriority
     due_date: date | None
     created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def assume_utc(cls, value: datetime) -> datetime:
+        # DB의 DATETIME은 시간대 없이 UTC로 저장하므로 응답에서 UTC로 표시한다.
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value

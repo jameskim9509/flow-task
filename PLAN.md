@@ -86,11 +86,37 @@
     CORS: curl로 허용 origin 사전요청 200·Allow-Origin 헤더 확인, 다른 origin 400·헤더 없음.
   - 남은 확인: 실제 브라우저에서 화면과 CORS 동작 확인(jsdom의 fetch는 CORS를 적용하지 않음).
 ## 4장: DB
-- [ ] T09: PostgreSQL 전용 사용자·DB와 .env 준비. 접속 확인.
-- [ ] T10: backend/database.py, models.py, init_db.py 생성.
+- [x] T09: MariaDB 전용 사용자·DB와 .env 준비. 접속 확인.
+  - 문서 정리: PLAN의 PostgreSQL을 PRD·AGENTS 기준 MariaDB로 수정(2026-10-13 사용자 확인).
+  - 변경 파일: .env.example(변수 이름과 가짜 값), .env(실제 값, Git 제외·권한 600)
+  - 구성: DB task_flow(utf8mb4), 사용자 task_flow_app@localhost, task_flow.* 권한만 부여(사용자가 sudo로 생성).
+  - 실행 명령: mariadb --defaults-extra-file=<(.env 값으로 만든 client 설정) -h 127.0.0.1 -P 3306 task_flow -e "SELECT 1"
+  - 확인 결과(2026-10-13): .env 값으로 127.0.0.1·localhost 접속 모두 SELECT 1 = 1, CURRENT_USER task_flow_app@localhost,
+    DATABASE task_flow, utf8mb4(utf8mb4_uca1400_ai_ci), MariaDB 11.8.6. 접근 가능한 DB는 task_flow만. 테이블 0개.
+  - 참고: 현재 권한은 task_flow.*에 ALL PRIVILEGES(DROP 포함). 서버 분리(T12) 시 App 서버 주소용 사용자 추가 필요.
+- [x] T10: backend/database.py, models.py, init_db.py 생성.
   확인: python -m backend.init_db 실행 후 tasks 테이블 확인.
-- [ ] T11: API 메모리 저장을 DB로 교체.
+  - 변경 파일: backend/database.py(.env 로드·engine·세션), backend/models.py(tasks 테이블), backend/init_db.py(없는 테이블만 생성),
+    requirements.txt(sqlalchemy, pymysql, python-dotenv 추가)
+  - 실행 명령: .venv/bin/python -m pip install -r requirements.txt && .venv/bin/python -m backend.init_db
+  - 확인 결과(2026-10-13): 1차 실행 "tasks: 생성함", 2차 실행 "이미 있음(변경 안 함)". SHOW CREATE TABLE로 컬럼 확인 —
+    id INT AUTO_INCREMENT PK, title VARCHAR(100), description VARCHAR(2000) DEFAULT '', status ENUM(TODO,DOING,DONE) DEFAULT TODO,
+    priority ENUM(HIGH,NORMAL,LOW) DEFAULT NORMAL, due_date DATE NULL, created_at DATETIME(UTC), InnoDB·utf8mb4.
+    ROLLBACK 트랜잭션으로 기본값·한글 저장 확인, 빈 제목(CHECK)·잘못된 status·101자 제목 거절, ORM 매핑 확인. 테스트 후 행 0개.
+    .env 변수 누락 시 변수 이름만 표시(값 미출력). 기존 메모리 API 라우트 영향 없음.
+  - 참고: 롤백한 테스트 INSERT로 AUTO_INCREMENT가 진행되어 첫 실제 id는 3부터 시작한다(동작 영향 없음).
+- [x] T11: API 메모리 저장을 DB로 교체.
   확인: 등록한 행을 SQL로 조회. API 재시작 후 데이터 유지.
+  - 변경 파일: backend/store.py(메모리 → SQLAlchemy 조회·저장), backend/main.py(요청별 DB 세션, DB 접속 실패 503),
+    backend/database.py(get_db), backend/schemas.py(ORM 변환, created_at UTC 표시), API-SPEC.md(저장 방식, 503, id 설명)
+  - 범위: API 경로·요청·응답 형식은 유지. /api/health는 DB와 무관하게 ok(T05 계약 유지). 프런트엔드 변경 없음.
+  - 실행 명령: .venv/bin/python -m backend.init_db (최초 1회) / .venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+  - 확인 결과(2026-10-13): curl 등록 3건 후 SQL SELECT로 같은 행 확인(한글·줄바꿈 설명, ENUM, 날짜, UTC created_at).
+    API 중지·재시작 후 GET 결과 동일(데이터 유지). T06·T07 검증 재실행 통과 — POST 위반 7종·PATCH 위반 5종 422, 위반 후 불변,
+    없는 ID 404, DELETE 204, 미전달 필드 유지, due_date null 해제, q 대소문자 무시·%와 _는 글자 그대로 검색, AND 필터.
+    DB 접속 불가(잘못된 포트로 실행) 시 GET·POST 503 {"detail":"Database unavailable"}, 로그·응답에 비밀번호 없음.
+    jsdom 화면 확인 8개 통과 — DB 데이터 표시, 화면 등록·상태 변경·삭제(취소 포함)가 DB와 일치, API 재시작 후 화면 유지, API 중지 시 오류 표시.
+  - 남은 데이터: 확인용 행 2개(id 3 "DB 저장 확인", id 4 "100% 완료_검색")를 DB에 남겨 둠. 필요 없으면 화면에서 삭제.
 ## 5장: 서버 분리
 - [ ] T12: DB 서버 구성 후 App 서버에서 SELECT 1 확인.
 - [ ] T13: App 서버 코드·가상환경·환경변수·systemd 구성.
@@ -100,6 +126,10 @@
 ## 실행 기준
 T01~T04: python3 -m http.server 5500 --bind 127.0.0.1 --directory frontend
 T05~T11: 가상환경에서 python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+통합 실행(T11 이후, 사용자 요청 2026-10-13): 위 uvicorn 명령 하나로 http://127.0.0.1:8000/ 화면과 /api를 함께 제공한다.
+  - 변경: backend/main.py에서 frontend/ 정적 파일을 / 경로에 연결(API 경로 등록 후 마지막), API-SPEC.md 프런트엔드 연결 설명.
+  - 확인(2026-10-13, 포트 8001에서 실행): /, index.html, styles.css, app.js 200, /api·/docs 정상, 화면이 같은 주소 /api 호출,
+    화면 등록·상태 변경·삭제가 DB와 일치. /.env, ../.env, %2e%2e 경로, backend/*.py, PLAN.md는 404. 5500 분리 실행 CORS 유지.
 실제 존재하는 파일을 확인한 뒤 명령을 실행한다.
 ## 기록
 각 작업에 변경 파일, 실행 명령, 실제 확인 결과, 남은 오류를 기록한다.

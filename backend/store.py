@@ -1,59 +1,53 @@
-from datetime import datetime, timezone
-from threading import Lock
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
+from .models import Task as TaskRow
 from .schemas import Task, TaskCreate, TaskPriority, TaskStatus, TaskUpdate
 
 
-class MemoryTaskStore:
-    """API 프로세스 메모리에 할 일을 보관한다. 재시작하면 사라진다."""
-
-    def __init__(self) -> None:
-        self._tasks: dict[int, Task] = {}
-        self._next_id = 1
-        self._lock = Lock()
-
-    def list(
-        self,
-        q: str | None = None,
-        status: TaskStatus | None = None,
-        priority: TaskPriority | None = None,
-    ) -> list[Task]:
-        keyword = (q or "").strip().casefold()
-        with self._lock:
-            tasks = sorted(self._tasks.values(), key=lambda task: task.id)
-        # 제목 검색·상태·우선순위 조건을 AND로 적용한다.
-        return [
-            task
-            for task in tasks
-            if (not keyword or keyword in task.title.casefold())
-            and (status is None or task.status == status)
-            and (priority is None or task.priority == priority)
-        ]
-
-    def create(self, data: TaskCreate) -> Task:
-        with self._lock:
-            task = Task(
-                id=self._next_id,
-                created_at=datetime.now(timezone.utc).replace(microsecond=0),
-                **data.model_dump(),
-            )
-            self._tasks[task.id] = task
-            self._next_id += 1
-            return task
-
-    def update(self, task_id: int, data: TaskUpdate) -> Task | None:
-        with self._lock:
-            task = self._tasks.get(task_id)
-            if task is None:
-                return None
-            # 전달하지 않은 필드는 유지한다.
-            updated = task.model_copy(update=data.model_dump(exclude_unset=True))
-            self._tasks[task_id] = updated
-            return updated
-
-    def delete(self, task_id: int) -> bool:
-        with self._lock:
-            return self._tasks.pop(task_id, None) is not None
+def list_tasks(
+    db: Session,
+    q: str | None = None,
+    status: TaskStatus | None = None,
+    priority: TaskPriority | None = None,
+) -> list[Task]:
+    # 제목 검색·상태·우선순위 조건을 AND로 적용한다.
+    query = select(TaskRow).order_by(TaskRow.id)
+    keyword = (q or "").strip()
+    if keyword:
+        # %, _ 같은 문자도 글자 그대로 검색한다.
+        query = query.where(TaskRow.title.icontains(keyword, autoescape=True))
+    if status is not None:
+        query = query.where(TaskRow.status == status)
+    if priority is not None:
+        query = query.where(TaskRow.priority == priority)
+    return [Task.model_validate(row) for row in db.scalars(query)]
 
 
-store = MemoryTaskStore()
+def create_task(db: Session, data: TaskCreate) -> Task:
+    row = TaskRow(**data.model_dump())
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return Task.model_validate(row)
+
+
+def update_task(db: Session, task_id: int, data: TaskUpdate) -> Task | None:
+    row = db.get(TaskRow, task_id)
+    if row is None:
+        return None
+    # 전달하지 않은 필드는 유지한다.
+    for name, value in data.model_dump(exclude_unset=True).items():
+        setattr(row, name, value)
+    db.commit()
+    db.refresh(row)
+    return Task.model_validate(row)
+
+
+def delete_task(db: Session, task_id: int) -> bool:
+    row = db.get(TaskRow, task_id)
+    if row is None:
+        return False
+    db.delete(row)
+    db.commit()
+    return True

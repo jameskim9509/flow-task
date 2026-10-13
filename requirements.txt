@@ -2,3 +2,9 @@
 fastapi==0.143.0
 # uvicorn: FastAPI 실행용 ASGI 서버
 uvicorn[standard]==0.54.0
+# SQLAlchemy: tasks 테이블 정의와 DB 세션
+sqlalchemy==2.1.4
+# PyMySQL: SQLAlchemy가 MariaDB에 접속할 때 쓰는 드라이버
+pymysql==1.2.3
+# python-dotenv: .env의 DB 접속 정보 읽기
+python-dotenv==1.2.4
